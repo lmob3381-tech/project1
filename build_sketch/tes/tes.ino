@@ -1,98 +1,104 @@
 #include <WiFi.h>
 #include "esp_wifi.h"
 
-// Pin LED bawaan board DOIT ESP32 DevKit V1 (GPIO 2)
+// Pin LED bawaan pada board ESP32 DevKit V1
 #define LED_PIN 2
 
-// Daftar 5 Nama Wi-Fi (SSID) untuk tes hasil compile & flash
-const int TOTAL_WIFI = 5;
-const char* daftar_ssid[TOTAL_WIFI] = {
-  "01_ESP32_Test_WiFi_A",
-  "02_ESP32_Test_WiFi_B",
-  "03_ESP32_Test_WiFi_C",
-  "04_ESP32_Test_WiFi_D",
-  "05_ESP32_Test_WiFi_E"
+// Channel WiFi yang digunakan (1 - 11)
+const uint8_t WIFI_CHANNEL = 1;
+
+// Daftar 5 nama WiFi (SSID) yang ingin dideploy (maksimal 32 karakter per nama)
+const char* ssids[5] = {
+  "ESP32_WiFi_01",
+  "ESP32_WiFi_02",
+  "ESP32_WiFi_03",
+  "ESP32_WiFi_04",
+  "ESP32_WiFi_05"
 };
 
-// Template paket IEEE 802.11 Beacon Frame standar agar ke-5 SSID tampil bersamaan di daftar Wi-Fi HP
-uint8_t beaconPacket[128] = {
-  0x80, 0x00,                         // Frame Control: Beacon (0x80)
-  0x00, 0x00,                         // Duration
-  0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // Destination: Broadcast
-  0x01, 0x02, 0x03, 0x04, 0x05, 0x06, // Source MAC (akan dibedakan tiap SSID)
-  0x01, 0x02, 0x03, 0x04, 0x05, 0x06, // BSSID MAC (akan dibedakan tiap SSID)
-  0x00, 0x00,                         // Sequence number
-  0x83, 0x51, 0xf7, 0x8f, 0x0f, 0x00, 0x00, 0x00, // Timestamp
-  0x64, 0x00,                         // Beacon Interval (100 TU = ~102.4 ms)
-  0x01, 0x04,                         // Capability Info (ESS, Open Network / Tanpa Password)
-  0x00                                // Tag 0: SSID Parameter Set (diisi dinamis di bawah)
-};
+const int TOTAL_SSID = 5;
 
-unsigned long lastBlink = 0;
-bool ledState = false;
-
-void kirimBeaconSSID(int index) {
-  const char* ssid = daftar_ssid[index];
-  int ssidLen = strlen(ssid);
-  if (ssidLen > 32) ssidLen = 32;
-
-  // Bedakan byte terakhir MAC Address untuk masing-masing dari 5 SSID
-  uint8_t customMac[6] = { 0x36, 0x33, 0x33, 0x33, 0x33, (uint8_t)(0x10 + index) };
-  memcpy(&beaconPacket[10], customMac, 6);
-  memcpy(&beaconPacket[16], customMac, 6);
-
-  // Set panjang SSID dan salin nama SSID ke dalam frame
-  beaconPacket[37] = ssidLen;
-  memcpy(&beaconPacket[38], ssid, ssidLen);
-
-  int pos = 38 + ssidLen;
-
-  // Tag 1: Supported Rates (1, 2, 5.5, 11, 6, 9, 12, 18 Mbps)
-  uint8_t ratesAndChannel[] = {
-    0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24,
-    0x03, 0x01, 0x01 // Tag 3: DS Parameter Set (Channel 1)
+void sendBeacon(const char* ssid, uint8_t index) {
+  uint8_t packet[128] = {
+    // 0-1: Frame Control (0x80 = Beacon Frame)
+    0x80, 0x00,
+    // 2-3: Duration
+    0x00, 0x00,
+    // 4-9: Destination Address (Broadcast)
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    // 10-15: Source Address (Locally Administered MAC)
+    0x02, 0x1a, 0x2b, 0x3c, 0x4d, 0x00,
+    // 16-21: BSSID (Disamakan dengan Source Address)
+    0x02, 0x1a, 0x2b, 0x3c, 0x4d, 0x00,
+    // 22-23: Sequence Number (Diatur otomatis oleh hardware)
+    0x00, 0x00,
+    // 24-31: Timestamp (8 byte)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 32-33: Beacon Interval (100 TU = ~102.4 ms)
+    0x64, 0x00,
+    // 34-35: Capability Info (0x0401 = Open Network, ESS, Short Slot Time)
+    0x01, 0x04
   };
 
-  memcpy(&beaconPacket[pos], ratesAndChannel, sizeof(ratesAndChannel));
-  int packetSize = pos + sizeof(ratesAndChannel);
+  // Ubah byte terakhir MAC/BSSID agar HP mendeteksinya sebagai 5 titik akses berbeda
+  packet[15] = index + 1;
+  packet[21] = index + 1;
 
-  // Pancarkan paket Beacon melalui interface AP ESP32
-  esp_wifi_80211_tx(WIFI_IF_AP, beaconPacket, packetSize, false);
+  // Batasi panjang SSID maksimal 32 karakter sesuai standar 802.11
+  size_t ssidLen = strlen(ssid);
+  if (ssidLen > 32) ssidLen = 32;
+
+  // Tag 0: SSID Parameter Set
+  packet[36] = 0x00;            // Element ID: SSID
+  packet[37] = (uint8_t)ssidLen; // Panjang SSID
+  memcpy(&packet[38], ssid, ssidLen);
+
+  size_t pos = 38 + ssidLen;
+
+  // Tag 1: Supported Rates (Wajib ada agar terbaca oleh pemindai WiFi HP/Laptop)
+  const uint8_t supportedRates[] = {
+    0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c
+  };
+  memcpy(&packet[pos], supportedRates, sizeof(supportedRates));
+  pos += sizeof(supportedRates);
+
+  // Tag 3: DS Parameter Set (Channel)
+  packet[pos++] = 0x03;         // Element ID: DS Parameter
+  packet[pos++] = 0x01;         // Panjang: 1 byte
+  packet[pos++] = WIFI_CHANNEL; // Channel aktif
+
+  // Pancarkan paket mentah melalui antarmuka Access Point
+  esp_wifi_80211_tx(WIFI_IF_AP, packet, pos, true);
 }
 
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);
 
-  Serial.println("\n==========================================");
-  Serial.println("Memulai Tes Deploy 5 Nama Wi-Fi ESP32...");
-  Serial.println("==========================================");
-
-  // Inisialisasi mode Access Point pada Channel 1
+  // Inisialisasi mode Access Point dengan SSID bawaan disembunyikan (hidden = 1)
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(daftar_ssid[0], NULL, 1, 0, 4);
-  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  WiFi.softAP("ESP32_Hidden_Init", "12345678", WIFI_CHANNEL, 1);
+  esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-  for (int i = 0; i < TOTAL_WIFI; i++) {
-    Serial.printf("[%d] Mengaktifkan SSID: %s\n", i + 1, daftar_ssid[i]);
+  Serial.println("\n=== Tes Deploy 5 SSID Dimulai ===");
+  for (int i = 0; i < TOTAL_SSID; i++) {
+    Serial.printf("[%d] %s\n", i + 1, ssids[i]);
   }
-  Serial.println("Silakan cek daftar Wi-Fi di HP kamu!");
 }
 
 void loop() {
-  // Pancarkan ke-5 SSID secara simultan setiap ~20ms per siklus
-  for (int i = 0; i < TOTAL_WIFI; i++) {
-    kirimBeaconSSID(i);
-    delay(4);
+  // Pancarkan ke-5 SSID secara berurutan
+  for (int i = 0; i < TOTAL_SSID; i++) {
+    sendBeacon(ssids[i], i);
+    delay(20); // Total siklus 5 x 20ms = 100ms (sesuai interval beacon standar)
   }
 
-  // Kedipkan LED biru (GPIO 2) setiap 500ms sebagai tanda ESP32 berjalan normal
-  if (millis() - lastBlink >= 500) {
+  // Kedipkan LED biru bawaan setiap ~1 detik sebagai indikator aktif
+  static unsigned long lastBlink = 0;
+  if (millis() - lastBlink > 1000) {
     lastBlink = millis();
-    ledState = !ledState;
-    digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
   }
 }
 
-// Compiled via Termux at 2026-11-07T07:22:26Z
+// Compiled via Termux at 2026-11-07T07:45:50Z
