@@ -1,0 +1,87 @@
+name: Compile ESP32 DevKit V1 Firmware
+
+on:
+  push:
+    paths:
+      - 'build_sketch/**'
+  workflow_dispatch:
+
+jobs:
+  build-esp32:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Cache Arduino ESP32 Core & Libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: esp32-core-${{ runner.os }}-v1
+
+      - name: Install ESP32 Board Core (DOIT ESP32 DEVKIT V1)
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          if ! arduino-cli core list | grep -q "esp32:esp32"; then
+            arduino-cli core install esp32:esp32
+          fi
+
+      - name: Install Extra Libraries (If Configured)
+        run: |
+          if [ -f "build_sketch/libraries.txt" ]; then
+            LIBS=$(cat build_sketch/libraries.txt)
+            if [ -n "$LIBS" ]; then
+              IFS=',' read -ra LIB_ARRAY <<< "$LIBS"
+              for lib in "${LIB_ARRAY[@]}"; do
+                lib_trimmed=$(echo "$lib" | xargs)
+                if [ -n "$lib_trimmed" ]; then
+                  echo "Menginstall library: $lib_trimmed"
+                  arduino-cli lib install "$lib_trimmed" || true
+                fi
+              done
+            fi
+          fi
+
+      - name: Auto-Detect & Compile Sketch (.ino to .bin)
+        run: |
+          INO_PATH=$(find build_sketch -name "*.ino" -type f -printf "%T@ %p\n" | sort -n | tail -1 | cut -d' ' -f2-)
+          if [ -z "$INO_PATH" ]; then
+            echo "Tidak ada file .ino ditemukan di folder build_sketch/"
+            exit 1
+          fi
+
+          FQBN="esp32:esp32:esp32doit-devkit-v1"
+          if [ -f "build_sketch/fqbn.txt" ]; then
+            CUSTOM_FQBN=$(cat build_sketch/fqbn.txt | xargs)
+            if [ -n "$CUSTOM_FQBN" ]; then
+              FQBN="$CUSTOM_FQBN"
+            fi
+          fi
+
+          SKETCH_DIR=$(dirname "$INO_PATH")
+          mkdir -p "$RUNNER_TEMP/output_bin"
+
+          echo "Mengcompile: $INO_PATH menggunakan board $FQBN..."
+          arduino-cli compile \
+            --fqbn "$FQBN" \
+            --output-dir "$RUNNER_TEMP/output_bin" \
+            "$SKETCH_DIR"
+
+          echo "Daftar file hasil compile (.bin):"
+          ls -lh "$RUNNER_TEMP/output_bin"
+
+      - name: Upload Compiled Firmware (.bin) Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware-bin
+          path: ${{ runner.temp }}/output_bin/*.bin
+          if-no-files-found: error
+          retention-days: 5
